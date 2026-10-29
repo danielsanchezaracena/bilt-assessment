@@ -28,26 +28,33 @@ public class RewardsEngine {
         this.processedEventStore = processedEventStore;
     }
 
+
     public PointsResult processPayment(PaymentEvent event, MemberAccount member) {
-        if (processedEventStore.isDuplicate(event.getEventId())) {
-            return new PointsResult(member.getMemberId(), 0, ProcessingOutcome.DUPLICATE);
+
+        /*
+         * Keep the duplicate check, points update, and mark as one critical
+         * section. Otherwise two workers can both pass the check before
+         * either one records the event.
+         */
+        synchronized (processedEventStore) {
+            if (processedEventStore.isDuplicate(event.getEventId())) {
+                return new PointsResult(member.getMemberId(), 0, ProcessingOutcome.DUPLICATE);
+            }
+
+            long basePoints = pointsCalculator.calculateBasePoints(event);
+            long pointsWithBonus = pointsCalculator.applyStreakBonusIfEligible(
+                    basePoints, member.getCurrentStreakMonths());
+
+            YearMonth month = YearMonth.from(event.getPaymentDate());
+            long alreadyEarnedThisMonth = member.getPointsForMonth(month);
+            long remainingCap = Math.max(0, MONTHLY_POINTS_CAP - alreadyEarnedThisMonth);
+            long pointsToAward = Math.min(pointsWithBonus, remainingCap);
+
+            member.addPointsForMonth(month, pointsToAward);
+            processedEventStore.markProcessed(event.getEventId());
+
+            ProcessingOutcome outcome = pointsToAward == 0? ProcessingOutcome.CAPPED : ProcessingOutcome.AWARDED;
+            return new PointsResult(member.getMemberId(), pointsToAward, outcome);
         }
-
-        long basePoints = pointsCalculator.calculateBasePoints(event);
-        long pointsWithBonus = pointsCalculator.applyStreakBonusIfEligible(
-                basePoints, member.getCurrentStreakMonths());
-
-        YearMonth month = YearMonth.from(event.getPaymentDate());
-        long alreadyEarnedThisMonth = member.getPointsForMonth(month);
-        long remainingCap = Math.max(0, MONTHLY_POINTS_CAP - alreadyEarnedThisMonth);
-        long pointsToAward = Math.min(pointsWithBonus, remainingCap);
-
-        member.addPointsForMonth(month, pointsToAward);
-        processedEventStore.markProcessed(event.getEventId());
-
-        ProcessingOutcome outcome = pointsToAward == 0
-                ? ProcessingOutcome.CAPPED
-                : ProcessingOutcome.AWARDED;
-        return new PointsResult(member.getMemberId(), pointsToAward, outcome);
     }
 }
